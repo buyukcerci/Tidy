@@ -2,6 +2,12 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import tidyIcon from "./assets/tidy-icon.png";
 import "./App.css";
+import "./oauth.css";
+import { useConnection } from "./hooks/useConnection";
+import { AccountArea } from "./components/AccountArea";
+import { OAuthSetup } from "./components/OAuthSetup";
+import type { DisconnectOutcome } from "./lib/oauth";
+import { displayAccountName } from "./lib/displayAccountName";
 
 type Page = "Dashboard" | "Scan" | "Review" | "History";
 
@@ -25,12 +31,74 @@ function App() {
   const [activePage, setActivePage] = useState<Page>("Dashboard");
   const [health, setHealth] = useState<HealthStatus | null>(null);
   const [healthError, setHealthError] = useState<string | null>(null);
+  const [showSetup, setShowSetup] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const connection = useConnection();
+  const status = connection.status;
+  const configured = status?.oauth_configured ?? false;
+  const connectedName =
+    status?.state === "connected" && status.account
+      ? displayAccountName(status.account)
+      : null;
+  const disconnected = status?.state === "disconnected";
 
   useEffect(() => {
     invoke<HealthStatus>("health_check")
       .then(setHealth)
       .catch((error: unknown) => setHealthError(String(error)));
   }, []);
+
+  function handleDisconnectResult(outcome: DisconnectOutcome | null) {
+    if (outcome && !outcome.keychain_cleared) {
+      setNotice(
+        "Tidy could not fully clear the system keychain. Remove the stored credential manually to be safe."
+      );
+    } else if (outcome && !outcome.revoked) {
+      setNotice(
+        "Credentials were removed locally, but Google could not confirm revocation. You can revoke access in your Google account settings."
+      );
+    } else {
+      setNotice(null);
+    }
+  }
+
+  function heroAction() {
+    if (connection.connecting) {
+      return (
+        <div className="hero-action-stack">
+          <button className="primary-action" type="button" disabled>
+            Opening Google sign-in…
+          </button>
+          <button className="link-button" type="button" onClick={connection.cancelConnect}>
+            Cancel
+          </button>
+        </div>
+      );
+    }
+    if (!configured) {
+      return (
+        <button className="primary-action" type="button" onClick={() => setShowSetup(true)}>
+          Set up Google sign-in <span>→</span>
+        </button>
+      );
+    }
+    if (status?.state === "connected") {
+      return null;
+    }
+    if (status?.state === "disconnected") {
+      return (
+        <button className="primary-action" type="button" onClick={connection.connect}>
+          Reconnect account <span>→</span>
+        </button>
+      );
+    }
+    return (
+      <button className="primary-action" type="button" onClick={connection.connect}>
+        Connect Google Drive <span>→</span>
+      </button>
+    );
+  }
 
   return (
     <div className="app-shell">
@@ -70,11 +138,48 @@ function App() {
       <main className="main-content">
         <header className="topbar">
           <span className="eyebrow">{activePage}</span>
-          <span className="account-state">No account connected</span>
+          <AccountArea
+            configured={configured}
+            connectedAccountName={connectedName}
+            disconnected={disconnected}
+            authentication={status?.authentication ?? "idle"}
+            authMessage={status?.auth_message ?? null}
+            controls={{
+              connecting: connection.connecting,
+              connectError: connection.connectError,
+              disconnecting: connection.disconnecting,
+              connect: connection.connect,
+              cancelConnect: connection.cancelConnect,
+              disconnect: connection.disconnect,
+            }}
+            onOpenSetup={() => setShowSetup(true)}
+            onDisconnectResult={handleDisconnectResult}
+          />
         </header>
 
+        {notice ? (
+          <div className="notice-banner" role="status">
+            <span>{notice}</span>
+            <button type="button" onClick={() => setNotice(null)}>
+              Dismiss
+            </button>
+          </div>
+        ) : null}
+
+        {status?.auth_message ? (
+          <div className="notice-banner notice-banner-info" role="status">
+            <span>{status.auth_message}</span>
+          </div>
+        ) : null}
+
         {activePage === "Dashboard" ? (
-          <Dashboard health={health} healthError={healthError} />
+          <Dashboard
+            health={health}
+            healthError={healthError}
+            connectedName={connectedName}
+            disconnected={disconnected}
+            heroAction={heroAction()}
+          />
         ) : (
           <section className="placeholder-panel">
             <span className="eyebrow">Workspace</span>
@@ -83,6 +188,16 @@ function App() {
           </section>
         )}
       </main>
+
+      {showSetup ? (
+        <OAuthSetup
+          onSaved={() => {
+            setShowSetup(false);
+            void connection.refresh();
+          }}
+          onClose={() => setShowSetup(false)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -127,9 +242,15 @@ function NavIcon({ name }: { name: Page }) {
 function Dashboard({
   health,
   healthError,
+  connectedName,
+  disconnected,
+  heroAction,
 }: {
   health: HealthStatus | null;
   healthError: string | null;
+  connectedName: string | null;
+  disconnected: boolean;
+  heroAction: React.ReactNode;
 }) {
   return (
     <div className="dashboard">
@@ -137,10 +258,21 @@ function Dashboard({
         <div>
           <span className="eyebrow">A clearer place to start</span>
           <h1>Your Drive,<br /><em>tidied gently.</em></h1>
-          <p>Connect your account to find duplicates, reclaim space, and make organization feel manageable.</p>
-          <button className="primary-action" type="button" disabled>
-            Connect Google Drive <span>→</span>
-          </button>
+          <p>
+            {connectedName
+              ? `Connected as ${connectedName}. Scan metadata, review suggestions, and approve changes only when you choose.`
+              : "Connect your account to find duplicates, reclaim space, and make organization feel manageable."}
+          </p>
+          {connectedName ? (
+            <span className="connected-pill">
+              <span className="status-dot" /> Connected
+            </span>
+          ) : (
+            heroAction
+          )}
+          {disconnected ? (
+            <p className="hero-note">Previous local data remains available until you erase it.</p>
+          ) : null}
         </div>
         <div className="hero-orbit" aria-hidden="true">
           <div className="orbit orbit-one" />
@@ -176,8 +308,8 @@ function Dashboard({
           </article>
           <article className="status-card accent-card">
             <span className="card-index">03 / ACCOUNT</span>
-            <h3>Connect your Drive</h3>
-            <p>Connect an account to begin organizing your Drive.</p>
+            <h3>{connectedName ? connectedName : "Connect your Drive"}</h3>
+            <p>{connectedName ? "Ready to scan." : "Connect an account to begin organizing your Drive."}</p>
           </article>
         </div>
       </section>

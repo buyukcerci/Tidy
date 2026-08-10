@@ -275,11 +275,15 @@ button {
   border-radius: 20px;
   background: #1a73e8;
   color: #fff;
-  cursor: not-allowed;
+  cursor: pointer;
   margin-top: 22px;
   padding: 11px 18px 11px 20px;
   font-size: 13px;
   box-shadow: 0 1px 2px rgb(60 64 67 / 24%);
+}
+
+.primary-action:disabled {
+  cursor: not-allowed;
   opacity: 0.66;
 }
 
